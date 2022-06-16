@@ -1,6 +1,6 @@
 # Protoplex
 
-Multiplex multiple server/client streams over a stream
+Multiplex multiple streams over a stream. Bidirectional clients / servers.
 
 `npm install protoplex`
 
