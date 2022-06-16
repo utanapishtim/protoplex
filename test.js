@@ -1,10 +1,8 @@
-import { once, on } from 'events'
 import SecretStream from '@hyperswarm/secret-stream'
 import Protomux from 'protomux'
 import Protoplex from './index.js'
-import { pipeline } from 'streamx'
+import { pipeline, Duplex } from 'streamx'
 import test from 'brittle'
-import { Duplex } from 'streamx'
 
 test('(client -> server) it should send and recv messages', async (t) => {
   t.plan(3)

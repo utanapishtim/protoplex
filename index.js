@@ -24,7 +24,7 @@ export default class Protoplex extends EventEmitter {
     this.ctl = this.mux.createChannel({ protocol: 'protoplex/ctl' })
     this.open = this.ctl.addMessage({
       encoding: struct.compile({ isInitiator: c.bool, id: c.raw }),
-      onmessage({ isInitiator, id }) {
+      onmessage ({ isInitiator, id }) {
         if (!isInitiator) return plex.emit(id.toString('hex'))
 
         let onresume = null
@@ -128,7 +128,7 @@ export default class Protoplex extends EventEmitter {
           onopen = null
           if (cb) cb(null)
         },
-        ondestroy() {
+        ondestroy () {
           if (destroyed) return
           destroyed = true
           stream.end()
