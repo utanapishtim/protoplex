@@ -138,7 +138,7 @@ export default class Protoplex extends EventEmitter {
 
       chan.open()
 
-      function backoff (stream) {
+      function backoff () {
         if (Readable.isBackpressured(stream)) return setImmediate(backoff)
         const cb = onresume
         onresume = null
