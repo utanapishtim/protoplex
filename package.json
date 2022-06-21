@@ -1,5 +1,4 @@
 {
-  "type": "module",
   "name": "protoplex",
   "version": "1.0.1",
   "description": "Multiplex multiple streams over a stream. Bidirectional clients / servers.",
