@@ -11,7 +11,6 @@ import Protomux from 'protomux'
 import Protoplex from 'protoplex'
 import { pipeline } from 'streamx'
 
-
 const server = new Protoplex(new Protomux(new SecretStream(false)))
 const client = new Protoplex(new Protomux(new SecretStream(true)))
 
@@ -49,10 +48,45 @@ stream.end()
 
 ## API
 
-#### `const plex = new Protoplex(mux)`
+#### `const plex = new Protoplex(mux, [options])`
 
-#### `const plex = Protoplex.from(muxOrStream)`
+Options include:
 
-#### `const duplex = plex.connect([id])`
+```js
+{
+  ctl: {
+    id: Buffer, // the id to use for the ctl channel
+    handshakeEncoding: compact encoding // handshake encoding for the ctl channel
+    handshake: must satisfy options.ctl.handshakeEncoding // handshake value for opening ctl channel
+  },
+  channel: {
+    handshakeEncoding: compact encoding, // handshake encoding for stream channels
+    handshake: must satisfy options.channel.handshakeEncoding, // default handshake for stream channels
+    encoding: compact encoding | (id, handshake) => compact encoding // value encoding for stream channel values
+  }
+}
+```
 
-#### `plex.on('connection', stream, id)`
+#### `const plex = Protoplex.from(muxOrStream, [options])`
+
+Options passed through to `new Protoplex(mux, [options])`.
+
+#### `const duplex = plex.connect([id], [options])`
+
+Options include:
+
+```js
+{
+  handshake: value should satisfy plex.options.channel.handshakeEncoding
+}
+```
+
+Alternatively, you can call `plex.connect([options])` and a random id will be generated.
+
+#### `plex.on('connection', stream, id, handshake)`
+
+#### `plex.on('open')`
+
+#### `plex.on('destroy', protocol, id)`
+
+#### `await plex.destroy()`
