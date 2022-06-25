@@ -18,7 +18,7 @@ test('emits "open"', async (t) => {
 
 test('emits "destroy" no connections', async (t) => {
   t.plan(1)
-  const { plexers: { server, client } } = testenv()
+  const { plexers: { server } } = testenv()
   await once(server, 'open')
   server.destroy()
   const [protocol] = await once(server, 'destroy')
@@ -28,9 +28,8 @@ test('emits "destroy" no connections', async (t) => {
 test('emits "destroy" with connections', async (t) => {
   t.plan(1)
   const { plexers: { server, client } } = testenv()
-  const message = 'Hello, World!'
   server.on('connection', async (stream, id) => server.destroy())
-  const stream = client.connect()
+  client.connect()
   await once(server, 'destroy')
   t.ok(true)
 })
@@ -50,7 +49,6 @@ test('(client -> server) it should send and recv messages', async (t) => {
   stream.write(Buffer.from(message))
   stream.end()
 })
-
 
 test('(client <- server) it should send and recv messages', async (t) => {
   t.plan(3)

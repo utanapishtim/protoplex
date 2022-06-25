@@ -1,10 +1,9 @@
-const { EventEmitter, once, on } = require('events')
+const { EventEmitter } = require('events')
 const Protomux = require('protomux')
 const { Duplex, Readable } = require('streamx')
 const c = require('compact-encoding')
 const struct = require('compact-encoding-struct')
 const crypto = require('hypercore-crypto')
-const assert = require('nanoassert')
 
 const EMPTY_BUFFER = Buffer.from([])
 const PROTOCOLS = { CTL: 'protoplex/ctl', CHAN: 'protoplex/channel' }
@@ -48,6 +47,7 @@ module.exports = class Protoplex extends EventEmitter {
         let bytes = null
         let onresume = null
         let destroyed = null
+        let stream = null
 
         const chan = mux.createChannel({
           protocol: PROTOCOLS.CHAN,
@@ -58,7 +58,7 @@ module.exports = class Protoplex extends EventEmitter {
               ? (channel.encoding(false, id, handshake) || c.raw)
               : (channel.encoding || c.raw)
 
-            const bytes = chan.addMessage({
+            bytes = chan.addMessage({
               encoding,
               onmessage (buf) {
                 if (stream.push(buf) === true) return
@@ -68,7 +68,30 @@ module.exports = class Protoplex extends EventEmitter {
                 backoff()
               }
             })
+
+            stream = new Duplex({
+              write (buf, cb) {
+                if (bytes.send(buf) === true) return cb(null)
+                mux.stream.once('drain', cb)
+              },
+              final (cb) {
+                if (destroyed) return cb(null)
+                destroyed = true
+                chan.close()
+                return cb(null)
+              }
+            })
+
+            stream.once('close', () => plex.emit('destroy', PROTOCOLS.CHAN, id))
+
             plex.emit('connection', stream, id, handshake)
+
+            function backoff () {
+              if (Readable.isBackpressured(stream)) return setImmediate(backoff)
+              const cb = onresume
+              onresume = null
+              if (cb) return cb()
+            }
           },
           ondestroy () {
             if (destroyed) return
@@ -78,34 +101,10 @@ module.exports = class Protoplex extends EventEmitter {
           }
         })
 
-        const stream = new Duplex({
-          write (buf, cb) {
-            if (bytes.send(buf) === true) return cb(null)
-            mux.stream.once('drain', cb)
-          },
-          final (cb) {
-            if (destroyed) return cb(null)
-            destroyed = true
-            chan.close()
-            return cb(null)
-          }
-        })
-
-        stream.once('close', () => plex.emit('destroy', PROTOCOLS.CHAN, id))
-
         plex.open.send({ isInitiator: false, id })
-
         chan.open(channel.handshake || EMPTY_BUFFER)
-
-        function backoff () {
-          if (Readable.isBackpressured(stream)) return setImmediate(backoff)
-          const cb = onresume
-          onresume = null
-          if (cb) return cb()
-        }
       }
     })
-
     this.ctl.open(ctl.handshake || EMPTY_BUFFER)
   }
 
@@ -133,7 +132,13 @@ module.exports = class Protoplex extends EventEmitter {
     let destroyed = null
 
     const stream = new Duplex({
-      open (cb) { onopen = cb },
+      eagerOpen: true,
+      open (cb) {
+        onopen = (e) => {
+          stream.resume()
+          cb(e)
+        }
+      },
       write (buf, cb) {
         if (bytes.send(buf) === true) return cb(null)
         plex.mux.stream.once('drain', cb)
@@ -159,7 +164,7 @@ module.exports = class Protoplex extends EventEmitter {
             : (channel.encoding || c.raw)
 
           bytes = chan.addMessage({
-            encoding: encoding,
+            encoding,
             onmessage (buf) {
               if (stream.push(buf) === true) return
               if (onresume) return
@@ -192,12 +197,10 @@ module.exports = class Protoplex extends EventEmitter {
     })
 
     this.open.send({ isInitiator: true, id })
-
     return stream
   }
 
   async _destroy () {
-    console.log('_destroy')
     const purgatory = new Map()
     const ps = []
 
