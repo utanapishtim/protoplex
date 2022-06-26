@@ -36,7 +36,7 @@ module.exports = class Protoplex extends EventEmitter {
       id: ctl.id || null,
       handshake: ctl.handshakeEncoding || c.raw,
       onopen (handshake) { setImmediate(() => plex.emit('open', handshake)) },
-      ondestroy () { setImmediate(() => plex.emit('destroy', PROTOCOLS.CTL, ctl.id || EMPTY_BUFFER)) }
+      ondestroy () { setImmediate(() => plex.emit('destroy', PROTOCOLS.CTL, ctl.id || null)) }
     })
 
     this.open = this.ctl.addMessage({
@@ -96,8 +96,10 @@ module.exports = class Protoplex extends EventEmitter {
           ondestroy () {
             if (destroyed) return
             destroyed = true
-            stream.push(null)
-            stream.end()
+            if (stream) {
+              stream.push(null)
+              stream.end()
+            }
           }
         })
 
@@ -135,8 +137,8 @@ module.exports = class Protoplex extends EventEmitter {
       eagerOpen: true,
       open (cb) {
         onopen = (e) => {
-          stream.resume()
-          cb(e)
+          if (!e) stream.resume()
+          return cb(e)
         }
       },
       write (buf, cb) {
@@ -181,8 +183,10 @@ module.exports = class Protoplex extends EventEmitter {
         ondestroy () {
           if (destroyed) return
           destroyed = true
-          stream.push(null)
-          stream.end()
+          if (stream) {
+            stream.push(null)
+            stream.end()
+          }
         }
       })
 
