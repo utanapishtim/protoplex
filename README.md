@@ -59,9 +59,9 @@ Options include:
     handshakeEncoding: compact encoding // handshake encoding for the ctl channel
     handshake: must satisfy options.ctl.handshakeEncoding // handshake value for opening ctl channel
   },
-  channel: {
+  chan: {
     handshakeEncoding: compact encoding, // handshake encoding for stream channels
-    handshake: must satisfy options.channel.handshakeEncoding, // default handshake for stream channels
+    handshake: must satisfy options.chan.handshakeEncoding, // default handshake for stream channels
     encoding: compact encoding | (id, handshake) => compact encoding // value encoding for stream channel values
   }
 }
@@ -71,13 +71,13 @@ Options include:
 
 Options passed through to `new Protoplex(mux, [options])`.
 
-#### `const duplex = plex.connect([id], [options])`
+#### `const duplex = plex.connect(id, [options])`
 
 Options include:
 
 ```js
 {
-  handshake: value should satisfy plex.options.channel.handshakeEncoding
+  handshake: value should satisfy plex.options.chan.handshakeEncoding
 }
 ```
 
@@ -85,8 +85,20 @@ Alternatively, you can call `plex.connect([options])` and a random id will be ge
 
 #### `plex.on('connection', stream, id, handshake)`
 
+Emitted when a remote connection is opened.
+
 #### `plex.on('open')`
+
+Emitted when the `Protoplex` instance is fully opened.
+
+#### `plex.on('close')`
+
+Emitted when all `Protoplex` instance is fully closed.
 
 #### `plex.on('destroy', protocol, id)`
 
-#### `await plex.destroy()`
+Emitted when an underlying `Protomux` channel is destroyed.
+
+#### `await plex.close()`
+
+Close the `Protoplex` instance and all open connections.

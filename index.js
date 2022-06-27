@@ -1,21 +1,24 @@
 const { EventEmitter } = require('events')
 const Protomux = require('protomux')
-const { Duplex, Readable } = require('streamx')
+const { Readable, Duplex } = require('streamx')
 const c = require('compact-encoding')
 const struct = require('compact-encoding-struct')
 const crypto = require('hypercore-crypto')
 
+const PROTOCOLS = { CTL: 'protoplex/ctl', CHAN: 'protoplex/chan' }
 const EMPTY_BUFFER = Buffer.from([])
-const PROTOCOLS = { CTL: 'protoplex/ctl', CHAN: 'protoplex/channel' }
 
 module.exports = class Protoplex extends EventEmitter {
   mux = null
   ctl = null
   open = null
 
-  destroying = null
+  opened = false
+  closed = false
 
-  static get PROTOCOLS () { return PROTOCOLS }
+  closing = null
+
+  static PROTOCOLS = PROTOCOLS
 
   static from (mors, options) {
     const mux = (mors instanceof Protomux) ? mors : new Protomux(mors)
@@ -25,110 +28,57 @@ module.exports = class Protoplex extends EventEmitter {
   constructor (mux, options = {}) {
     super()
 
-    const plex = this
-    const { ctl = {}, channel = {} } = options
+    const { ctl = {}, chan = {} } = options
+
+    ctl.handshake = (ctl.handshake ?? EMPTY_BUFFER)
+    ctl.handshakeEncoding = (ctl.handshakeEncoding ?? c.raw)
+    chan.handshake = (chan.handshake ?? EMPTY_BUFFER)
+    chan.handshakeEncoding = (chan.handshakeEncoding ?? c.raw)
+    chan.encoding = (chan.encoding ?? c.raw)
 
     this.mux = mux
-    this.options = options
+    this.options = { ctl, chan }
 
     this.ctl = this.mux.createChannel({
       protocol: PROTOCOLS.CTL,
-      id: ctl.id || null,
-      handshake: ctl.handshakeEncoding || c.raw,
-      onopen (handshake) { setImmediate(() => plex.emit('open', handshake)) },
-      ondestroy () { setImmediate(() => plex.emit('destroy', PROTOCOLS.CTL, ctl.id || null)) }
+      id: ctl.id,
+      handshake: c.raw,
+      onopen: (handshake) => {
+        this.opened = true
+        this.emit('open', handshake)
+      },
+      ondestroy: () => {
+        this.closed = true
+        this.emit('close', PROTOCOLS.CTL, ctl.id)
+      }
     })
 
     this.open = this.ctl.addMessage({
       encoding: struct.compile({ isInitiator: c.bool, id: c.raw }),
-      onmessage ({ isInitiator, id }) {
-        if (!isInitiator) return plex.emit(id.toString('hex'))
-
-        let bytes = null
-        let onresume = null
-        let destroyed = null
-        let stream = null
-
-        const chan = mux.createChannel({
-          protocol: PROTOCOLS.CHAN,
-          id,
-          handshake: channel.handshakeEncoding || c.raw,
-          onopen (handshake) {
-            const encoding = (typeof channel.encoding === 'function')
-              ? (channel.encoding(false, id, handshake) || c.raw)
-              : (channel.encoding || c.raw)
-
-            bytes = chan.addMessage({
-              encoding,
-              onmessage (buf) {
-                if (stream.push(buf) === true) return
-                if (onresume) return
-                onresume = () => chan.uncork()
-                chan.cork()
-                backoff()
-              }
-            })
-
-            stream = new Duplex({
-              write (buf, cb) {
-                if (bytes.send(buf) === true) return cb(null)
-                mux.stream.once('drain', cb)
-              },
-              final (cb) {
-                if (destroyed) return cb(null)
-                destroyed = true
-                chan.close()
-                return cb(null)
-              }
-            })
-
-            stream.once('close', () => plex.emit('destroy', PROTOCOLS.CHAN, id))
-
-            plex.emit('connection', stream, id, handshake)
-
-            function backoff () {
-              if (Readable.isBackpressured(stream)) return setImmediate(backoff)
-              const cb = onresume
-              onresume = null
-              if (cb) return cb()
-            }
-          },
-          ondestroy () {
-            if (destroyed) return
-            destroyed = true
-            if (stream) {
-              stream.push(null)
-              stream.end()
-            }
-          }
-        })
-
-        plex.open.send({ isInitiator: false, id })
-        chan.open(channel.handshake || EMPTY_BUFFER)
-      }
+      onmessage: onmessage.bind(this)
     })
-    this.ctl.open(ctl.handshake || EMPTY_BUFFER)
+
+    this.ctl.open(ctl.handshake)
   }
 
   connect (id = crypto.randomBytes(32), { handshake } = {}) {
-    if (this.destroying) {
+    if (this.closing) {
       const stream = new Duplex()
-      stream.destroy()
+      stream.push(null)
+      stream.end()
       return stream
     }
-
-    const plex = this
-    const { options: { channel = {} } } = plex
 
     if (!Buffer.isBuffer(id)) {
       handshake = id.handshake
       id = crypto.randomBytes(32)
     }
 
-    if (!handshake) handshake = (channel.handshake || EMPTY_BUFFER)
+    handshake = (handshake ?? this.options.chan.handshake)
 
     let chan = null
     let bytes = null
+
     let onopen = null
     let onresume = null
     let destroyed = null
@@ -136,14 +86,14 @@ module.exports = class Protoplex extends EventEmitter {
     const stream = new Duplex({
       eagerOpen: true,
       open (cb) {
-        onopen = (e) => {
-          if (!e) stream.resume()
-          return cb(e)
+        onopen = () => {
+          stream.resume()
+          return cb(null)
         }
       },
-      write (buf, cb) {
+      write: (buf, cb) => {
         if (bytes.send(buf) === true) return cb(null)
-        plex.mux.stream.once('drain', cb)
+        this.mux.stream.once('drain', cb)
       },
       final (cb) {
         if (destroyed) return cb(null)
@@ -153,33 +103,19 @@ module.exports = class Protoplex extends EventEmitter {
       }
     })
 
-    stream.once('close', () => plex.emit('destroy', PROTOCOLS.CHAN, id))
+    stream.once('close', () => this.emit('destroy', PROTOCOLS.CHAN, id))
 
-    this.once(id.toString('hex'), () => {
+    this.once(id.toString('hex'), onack.bind(this))
+    this.open.send({ isInitiator: true, id })
+
+    return stream
+
+    function onack () {
       chan = this.mux.createChannel({
         protocol: PROTOCOLS.CHAN,
         id,
-        handshake: channel.handshakeEncoding || c.raw,
-        onopen (handshake) {
-          const encoding = (typeof channel.encoding === 'function')
-            ? (channel.encoding(true, id, handshake) || c.raw)
-            : (channel.encoding || c.raw)
-
-          bytes = chan.addMessage({
-            encoding,
-            onmessage (buf) {
-              if (stream.push(buf) === true) return
-              if (onresume) return
-              onresume = () => chan.uncork()
-              chan.cork()
-              backoff()
-            }
-          })
-
-          const cb = onopen
-          onopen = null
-          if (cb) cb(null)
-        },
+        handshake: this.options.chan.handshakeEncoding,
+        onopen: onchanopen.bind(this),
         ondestroy () {
           if (destroyed) return
           destroyed = true
@@ -192,58 +128,142 @@ module.exports = class Protoplex extends EventEmitter {
 
       chan.open(handshake)
 
-      function backoff () {
-        if (Readable.isBackpressured(stream)) return setImmediate(backoff)
-        const cb = onresume
-        onresume = null
-        if (cb) return cb()
-      }
-    })
+      function onchanopen (handshake) {
+        const encoding = (typeof this.options.chan.encoding === 'function')
+          ? (this.options.chan.encoding(true, id, handshake) || c.raw)
+          : (this.options.chan.encoding || c.raw)
 
-    this.open.send({ isInitiator: true, id })
-    return stream
+        bytes = chan.addMessage({
+          encoding,
+          onmessage (buf) {
+            if (stream.push(buf) === true) return
+            if (onresume) return
+            onresume = () => chan.uncork()
+            chan.cork()
+            backoff()
+          }
+        })
+
+        const cb = onopen
+        onopen = null
+        if (cb) cb(null)
+
+        function backoff () {
+          if (Readable.isBackpressured(stream)) return setImmediate(backoff)
+          const cb = onresume
+          onresume = null
+          if (cb) return cb()
+        }
+      }
+    }
   }
 
-  async _destroy () {
+  async _close () {
     const purgatory = new Map()
-    const ps = []
+    const promises = []
 
-    this.on('destroy', function destroyer (protocol, id) {
-      if (protocol !== PROTOCOLS.CHAN) return
-      const key = id.toString('hex')
-      const inverse = purgatory.get(key)
-      inverse.resolve()
-      purgatory.delete(key)
-    })
+    this.on('destroy', destroyer)
 
-    for (const channel of this.mux) {
-      if (channel.protocol !== PROTOCOLS.CHAN) continue
-      const { inverse, promise } = inversepromise()
-      ps.push(promise)
-      purgatory.set(channel.id.toString('hex'), inverse)
-      channel.close()
+    for (const chan of this.mux) {
+      if (chan.protocol !== PROTOCOLS.CHAN) continue
+      const p = { resolve: null, reject: null }
+      promises.push(new Promise((resolve, reject) => Object.assign(p, { resolve, reject })))
+      purgatory.set(chan.id.toString('hex'), p)
+      chan.close()
     }
 
-    this.ctl.close()
-
-    await Promise.all(ps)
+    await Promise.all(promises)
+    this.removeListener('destroy', destroyer)
+    await new Promise((resolve) => {
+      const ondestroy = (proto) => { if (proto === PROTOCOLS.CTL) resolve() }
+      this.once('destroy', ondestroy)
+      this.ctl.close()
+    })
 
     this.ctl = null
     this.open = null
 
     return true
+
+    function destroyer (protocol, id) {
+      if (protocol !== PROTOCOLS.CHAN) return
+      const key = id.toString('hex')
+      purgatory.get(key).resolve()
+      purgatory.delete(key)
+    }
   }
 
-  async destroy () {
-    if (this.destroying) return this.destroying
-    this.destroying = this._destroy()
-    this.destroying.catch((e) => this.emit('error', e))
-    return this.destroying
+  close () {
+    if (this.closing) return this.closing
+    this.closing = this._close()
+    return this.closing
   }
 }
 
-function inversepromise () {
-  const inverse = { resolve: null, reject: null }
-  const promise = new Promise((resolve, reject) => Object.assign(inverse, { resolve, reject }))
-  return { inverse, promise }
+function onmessage ({ isInitiator, id }) {
+  if (!isInitiator) return this.emit(id.toString('hex'))
+
+  let bytes = null
+  let stream = null
+  let onresume = null
+  let destroyed = null
+
+  const chan = this.mux.createChannel({
+    protocol: PROTOCOLS.CHAN,
+    id,
+    handshake: this.options.chan.handshakeEncoding,
+    onopen: onopen.bind(this),
+    ondestroy: () => {
+      if (destroyed) return
+      destroyed = true
+      if (stream) {
+        stream.push(null)
+        stream.end()
+      }
+    }
+  })
+
+  this.open.send({ isInitiator: false, id })
+  chan.open(this.options.chan.handshake)
+
+  function onopen (handshake) {
+    const encoding = (typeof this.options.chan.encoding === 'function')
+      ? (this.options.chan.encoding(false, id, handshake) || c.raw)
+      : (this.options.chan.encoding || c.raw)
+
+    bytes = chan.addMessage({
+      encoding,
+      onmessage (buf) {
+        if (stream.push(buf) === true) return
+        if (onresume) return
+        onresume = () => chan.uncork()
+        chan.cork()
+        backoff()
+      }
+    })
+
+    stream = new Duplex({
+      write: (buf, cb) => {
+        if (bytes.send(buf) === true) return cb(null)
+        this.mux.stream.once('drain', cb)
+      },
+      final (cb) {
+        if (destroyed) return cb(null)
+        destroyed = true
+        chan.close()
+        return cb(null)
+      }
+    })
+
+    stream.once('close', () => this.emit('destroy', PROTOCOLS.CHAN, id))
+
+    this.emit('connection', stream, id, handshake)
+
+    function backoff () {
+      if (Readable.isBackpressured(stream)) return setImmediate(backoff)
+      const cb = onresume
+      onresume = null
+      if (cb) return cb()
+    }
+  }
 }

@@ -20,17 +20,19 @@ test('emits "destroy" no connections', async (t) => {
   t.plan(1)
   const { plexers: { server } } = testenv()
   await once(server, 'open')
-  server.destroy()
-  const [protocol] = await once(server, 'destroy')
+  const destroyed = once(server, 'close')
+  server.close()
+  const [protocol] = await destroyed
   t.is(protocol, Protoplex.PROTOCOLS.CTL)
 })
 
 test('emits "destroy" with connections', async (t) => {
   t.plan(1)
   const { plexers: { server, client } } = testenv()
-  server.on('connection', async (stream, id) => server.destroy())
+  const destroyed = once(server, 'close')
+  server.on('connection', async (stream, id) => server.close())
   client.connect()
-  await once(server, 'destroy')
+  await destroyed
   t.ok(true)
 })
 
@@ -48,6 +50,24 @@ test('(client -> server) it should send and recv messages', async (t) => {
   const stream = client.connect()
   stream.write(Buffer.from(message))
   stream.end()
+})
+
+test('(client -> server) it should send and recv messages write-before-connect', async (t) => {
+  t.plan(3)
+  const { plexers: { server, client }, pipeline: p } = testenv({ pipe: (...args) => () => pipeline(...args) })
+  const message = 'Hello, World!'
+  server.on('connection', async (stream, id) => {
+    console.log('connection')
+    t.ok(stream instanceof Duplex)
+    t.ok(Buffer.isBuffer(id))
+    let str = ''
+    for await (const buf of stream) str += buf.toString()
+    t.is(str, message)
+  })
+  const stream = client.connect()
+  stream.write(Buffer.from(message))
+  stream.end()
+  p()
 })
 
 test('(client <- server) it should send and recv messages', async (t) => {
@@ -90,7 +110,7 @@ test('it should support passing custom channel encoding', async (t) => {
   t.plan(1)
 
   const { plexers: { server, client } } = testenv({
-    channel: { encoding: struct.compile({ greeting: c.string }) }
+    chan: { encoding: struct.compile({ greeting: c.string }) }
   })
 
   const message = { greeting: 'Hello, World!' }
@@ -119,7 +139,7 @@ test('it should support resolving custom channel encoding from id', async (t) =>
   const string = 'string'
 
   const { plexers: { server, client } } = testenv({
-    channel: {
+    chan: {
       encoding: (_, id, handshake) => {
         t.ok(Buffer.isBuffer(id))
         t.ok(Buffer.isBuffer(handshake))
@@ -179,19 +199,28 @@ test('it should support resolving custom channel encoding from handshake', async
   const string = 'string'
 
   const { plexers: { server, client } } = testenv({
-    channel: {
+    chan: {
       encoding: (isInitiator, id, handshake) => {
         if (Buffer.compare(id, ids.fst) === 0) {
-          if (!isInitiator) t.ok(!Buffer.compare(ids.fst, handshake))
-          else t.ok(!Buffer.compare(Buffer.from([]), handshake))
+          if (!isInitiator) {
+            t.ok(!Buffer.compare(ids.fst, handshake))
+          } else {
+            t.ok(!Buffer.compare(Buffer.from([]), handshake))
+          }
           return struct.compile({ fst: c.string })
         } else if (Buffer.compare(id, ids.snd) === 0) {
-          if (!isInitiator) t.ok(!Buffer.compare(ids.snd, handshake))
-          else t.ok(!Buffer.compare(Buffer.from([]), handshake))
+          if (!isInitiator) {
+            t.ok(!Buffer.compare(ids.snd, handshake))
+          } else {
+            t.ok(!Buffer.compare(Buffer.from([]), handshake))
+          }
           return struct.compile({ snd: c.string })
         } else {
-          if (!isInitiator) t.ok(!Buffer.compare(Buffer.from(string), handshake))
-          else t.ok(!Buffer.compare(Buffer.from([]), handshake))
+          if (!isInitiator) {
+            t.ok(!Buffer.compare(Buffer.from(string), handshake))
+          } else {
+            t.ok(!Buffer.compare(Buffer.from([]), handshake))
+          }
           return c.raw
         }
       }
@@ -229,7 +258,7 @@ test('it should support resolving custom channel encoding from handshake', async
   })
 })
 
-function testenv ({ onend = noop, ctl, channel } = {}) {
+function testenv ({ onend = noop, ctl, chan, pipe = pipeline } = {}) {
   const streams = {
     server: new SecretStream(false),
     client: new SecretStream(true)
@@ -239,18 +268,18 @@ function testenv ({ onend = noop, ctl, channel } = {}) {
     client: new Protomux(streams.client)
   }
   const plexers = {
-    server: new Protoplex(muxers.server, { ctl, channel }),
-    client: new Protoplex(muxers.client, { ctl, channel })
+    server: new Protoplex(muxers.server, { ctl, chan, id: 'server' }),
+    client: new Protoplex(muxers.client, { ctl, chan, id: 'client' })
   }
 
-  pipeline(
-    plexers.server.mux.stream.rawStream,
+  const pline = pipe(
     plexers.client.mux.stream.rawStream,
     plexers.server.mux.stream.rawStream,
+    plexers.client.mux.stream.rawStream,
     onend
   )
 
-  return { streams, muxers, plexers }
+  return { streams, muxers, plexers, pipeline: pline }
 }
 
 function noop () {}
