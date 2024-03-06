@@ -1,6 +1,6 @@
 # Protoplex
 
-Multiplex multiple streams over a stream. Bidirectional clients / servers.
+Multiplexed streams over a protomux instance. Enables bi-directional clients and servers.
 
 `npm install protoplex`
 
@@ -20,8 +20,6 @@ pipeline(
   client.mux.stream.rawStream
 )
 
-// alternatively, const clientplex = Protoplex.from(new SecretStream(true))
-
 const message = Buffer.from('Hello, World!')
 
 server.on('connection', async (stream, id) => {
@@ -30,7 +28,9 @@ server.on('connection', async (stream, id) => {
   console.log(str) // prints 'Hello, World!'
 })
 
-let stream = client.connect()
+server.listen(Buffer.from('1'))
+
+let stream = client.connect(Buffer.from('1'))
 stream.write(message)
 stream.end()
 
@@ -41,7 +41,9 @@ client.on('connection', async (stream) => {
   for await (const buf of stream) str += buf.toString()
   console.log(str) // prints 'Hello, World!'
 })
-stream = server.connect()
+
+client.listen(Buffer.from('2'))
+stream = server.connect(Buffer.from('2'))
 stream.write(message)
 stream.end()
 ```
@@ -54,16 +56,13 @@ Options include:
 
 ```js
 {
-  ctl: {
-    id: Buffer, // the id to use for the ctl channel
-    handshakeEncoding: compact encoding // handshake encoding for the ctl channel
-    handshake: must satisfy options.ctl.handshakeEncoding // handshake value for opening ctl channel
-  },
-  chan: {
-    handshakeEncoding: compact encoding, // handshake encoding for stream channels
-    handshake: must satisfy options.chan.handshakeEncoding, // default handshake for stream channels
-    encoding: compact encoding | (id, handshake) => compact encoding // value encoding for stream channel values
-  }
+  id: b4a.from([]), // default id
+  handshake: b4a.from([]), // default handshake value
+  handshakeEncoding: c.raw, // default handshake encoding
+  onhandshake: (handshake) => true, // default function to accept or reject connection
+  encoding: c.raw, // default encoding for values in a stream
+  unique: false, // whether the underlying protomux channels should allow multi opens for a given  protcol, id pair
+  ...streamOptions // the rest of the options are default options for the underlying Duplex streams
 }
 ```
 
@@ -71,34 +70,20 @@ Options include:
 
 Options passed through to `new Protoplex(mux, [options])`.
 
-#### `const duplex = plex.connect(id, [options])`
+#### `const stream = plex.connect(id, [options])`
 
-Options include:
+Options are the same as for `Protoplex.from` but override those defaults for.
 
-```js
-{
-  handshake: value should satisfy plex.options.chan.handshakeEncoding
-}
-```
+TODO: ~~Alternatively, you can call `plex.connect([options])` and a random id will be generated.~~
 
-Alternatively, you can call `plex.connect([options])` and a random id will be generated.
+#### `stream.on('connect')`
 
-#### `plex.on('connection', stream, id, handshake)`
+Emitted when the stream is opened and the handshake was accepted.
+
+#### `plex.on('connection', (stream) => {})`
 
 Emitted when a remote connection is opened.
 
-#### `plex.on('open')`
+#### `for (const connection of plex)`
 
-Emitted when the `Protoplex` instance is fully opened.
-
-#### `plex.on('close')`
-
-Emitted when all `Protoplex` instance is fully closed.
-
-#### `plex.on('destroy', protocol, id)`
-
-Emitted when an underlying `Protomux` channel is destroyed.
-
-#### `await plex.close()`
-
-Close the `Protoplex` instance and all open connections.
+Iterate over all open connections

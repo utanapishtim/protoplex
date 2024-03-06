@@ -1,269 +1,293 @@
-const { EventEmitter } = require('events')
+const { EventEmitter } = require('ready-resource')
 const Protomux = require('protomux')
-const { Readable, Duplex } = require('streamx')
+const { Duplex } = require('streamx')
 const c = require('compact-encoding')
-const struct = require('compact-encoding-struct')
-const crypto = require('hypercore-crypto')
+const b4a = require('b4a')
 
-const PROTOCOLS = { CTL: 'protoplex/ctl', CHAN: 'protoplex/chan' }
-const EMPTY_BUFFER = Buffer.from([])
+const PROTOCOL = 'protoplex/alpha@0.0.0'
 
-module.exports = class Protoplex extends EventEmitter {
+class ProtoplexStream extends Duplex {
   mux = null
-  ctl = null
-  open = null
+  channel = null
 
-  opened = false
-  closed = false
+  protocol = PROTOCOL
+  id = b4a.from([])
+  handshake = b4a.from([])
+  handshakeEncoding = c.raw
+  onhandshake = null
+  encoding = c.array(c.raw)
+  unique = false
 
-  closing = null
+  remoteHandshake = null
 
-  static PROTOCOLS = PROTOCOLS
+  _q = []
+  _ondrain = null
 
-  static from (mors, options) {
-    const mux = (mors instanceof Protomux) ? mors : new Protomux(mors)
-    return new Protoplex(mux, options)
-  }
+  constructor (mux, opts = {}) {
+    const {
+      id,
+      handshake,
+      handshakeEncoding,
+      onhandshake,
+      encoding,
+      unique,
+      ...stream
+    } = opts
 
-  constructor (mux, options = {}) {
-    super()
+    super({ ...stream, eagerOpen: true })
 
-    const { ctl = {}, chan = {} } = options
-
-    ctl.handshake = (ctl.handshake ?? EMPTY_BUFFER)
-    ctl.handshakeEncoding = (ctl.handshakeEncoding ?? c.raw)
-    chan.handshake = (chan.handshake ?? EMPTY_BUFFER)
-    chan.handshakeEncoding = (chan.handshakeEncoding ?? c.raw)
-    chan.encoding = (chan.encoding ?? c.raw)
+    if (!(mux instanceof Protomux)) throw new Error('mux not an instance of Protomux!')
 
     this.mux = mux
-    this.options = { ctl, chan }
+    this.id = id ?? this.id
+    this.handshake = handshake ?? this.handshake
+    this.handshakeEncoding = handshakeEncoding ?? this.handshakeEncoding
+    this.onhandshake = onhandshake ?? this.onhandshake
+    this.encoding = c.array(encoding) ?? this.encoding
+    this.unique = unique ?? this.unique
+  }
 
-    this.ctl = this.mux.createChannel({
-      protocol: PROTOCOLS.CTL,
-      id: ctl.id,
-      handshake: c.raw,
-      onopen: (handshake) => {
-        this.opened = true
-        this.emit('open', handshake)
+  _open (cb) {
+    const {
+      mux,
+      protocol,
+      id,
+      handshake,
+      handshakeEncoding,
+      encoding,
+      unique
+    } = this
+
+    let flag = false
+    const _cb = (err) => {
+      if (flag) return
+      flag = true
+      return cb(err)
+    }
+
+    this.channel = mux.createChannel({
+      protocol,
+      id,
+      handshake: handshakeEncoding,
+      unique,
+      messages: [{ encoding, onmessage: this._onmessage.bind(this) }],
+      onopen: (handshake) => this._onopen(handshake, _cb),
+      onclose: () => {
+        if (!this.opened) _cb(null)
+        setTimeout(() => this.push(null), 0)
       },
       ondestroy: () => {
-        this.closed = true
-        this.emit('close', PROTOCOLS.CTL, ctl.id)
-      }
-    })
-
-    this.open = this.ctl.addMessage({
-      encoding: struct.compile({ isInitiator: c.bool, id: c.raw }),
-      onmessage: onmessage.bind(this)
-    })
-
-    this.ctl.open(ctl.handshake)
-  }
-
-  connect (id = crypto.randomBytes(32), { handshake } = {}) {
-    if (this.closing) {
-      const stream = new Duplex()
-      stream.push(null)
-      stream.end()
-      return stream
-    }
-
-    if (!Buffer.isBuffer(id)) {
-      handshake = id.handshake
-      id = crypto.randomBytes(32)
-    }
-
-    handshake = (handshake ?? this.options.chan.handshake)
-
-    let chan = null
-    let bytes = null
-
-    let onopen = null
-    let onresume = null
-    let destroyed = null
-
-    const stream = new Duplex({
-      eagerOpen: true,
-      open (cb) {
-        onopen = () => {
-          stream.resume()
-          return cb(null)
-        }
+        if (!this.opened) _cb(null)
+        setTimeout(() => this.destroy(), 0)
       },
-      write: (buf, cb) => {
-        if (bytes.send(buf) === true) return cb(null)
-        this.mux.stream.once('drain', cb)
-      },
-      final (cb) {
-        if (destroyed) return cb(null)
-        destroyed = true
-        chan.close()
-        return cb(null)
+      ondrain: () => {
+        this._callondrain(null)
       }
     })
 
-    stream.once('close', () => this.emit('destroy', PROTOCOLS.CHAN, id))
+    this.channel.open(handshake)
+  }
 
-    this.once(id.toString('hex'), onack.bind(this))
-    this.open.send({ isInitiator: true, id })
-
-    return stream
-
-    function onack () {
-      chan = this.mux.createChannel({
-        protocol: PROTOCOLS.CHAN,
-        id,
-        handshake: this.options.chan.handshakeEncoding,
-        onopen: onchanopen.bind(this),
-        ondestroy () {
-          if (destroyed) return
-          destroyed = true
-          if (stream) {
-            stream.push(null)
-            stream.end()
-          }
-        }
-      })
-
-      chan.open(handshake)
-
-      function onchanopen (handshake) {
-        const encoding = (typeof this.options.chan.encoding === 'function')
-          ? (this.options.chan.encoding(true, id, handshake) || c.raw)
-          : (this.options.chan.encoding || c.raw)
-
-        bytes = chan.addMessage({
-          encoding,
-          onmessage (buf) {
-            if (stream.push(buf) === true) return
-            if (onresume) return
-            onresume = () => chan.uncork()
-            chan.cork()
-            backoff()
-          }
-        })
-
-        const cb = onopen
-        onopen = null
-        if (cb) cb(null)
-
-        function backoff () {
-          if (Readable.isBackpressured(stream)) return setImmediate(backoff)
-          const cb = onresume
-          onresume = null
-          if (cb) return cb()
-        }
-      }
+  _writev (data, cb) {
+    try {
+      if (this.channel.messages[0].send(data)) return cb(null)
+      else this._ondrain = cb
+    } catch (err) {
+      return cb(err)
     }
   }
 
-  async _close () {
-    const purgatory = new Map()
-    const promises = []
-
-    this.on('destroy', destroyer)
-
-    for (const chan of this.mux) {
-      if (chan.protocol !== PROTOCOLS.CHAN) continue
-      const p = { resolve: null, reject: null }
-      promises.push(new Promise((resolve, reject) => Object.assign(p, { resolve, reject })))
-      purgatory.set(chan.id.toString('hex'), p)
-      chan.close()
-    }
-
-    await Promise.all(promises)
-    this.removeListener('destroy', destroyer)
-    await new Promise((resolve) => {
-      const ondestroy = (proto) => { if (proto === PROTOCOLS.CTL) resolve() }
-      this.once('destroy', ondestroy)
-      this.ctl.close()
-    })
-
-    this.ctl = null
-    this.open = null
-
-    return true
-
-    function destroyer (protocol, id) {
-      if (protocol !== PROTOCOLS.CHAN) return
-      const key = id.toString('hex')
-      purgatory.get(key).resolve()
-      purgatory.delete(key)
-    }
+  _read (cb) {
+    this.channel.uncork()
+    while (this._q.length && this.push(this._q.pop())) continue
+    if (this._q.length) this.channel.cork()
+    return cb(null)
   }
 
-  close () {
-    if (this.closing) return this.closing
-    this.closing = this._close()
-    return this.closing
+  _final (cb) {
+    setTimeout(() => this.channel.close(), 0)
+    return cb(null)
+  }
+
+  _destroy (cb) {
+    this.channel?.close()
+    this.mux = null
+    this.channel = null
+    return cb(null)
+  }
+
+  _predestroy () {
+    this.channel?.close()
+    this._callondrain(new Error('Stream was destroyed'))
+  }
+
+  _callondrain (err) {
+    const cb = this._ondrain
+    this._ondrain = null
+    if (cb) return cb(err)
+  }
+
+  _onmessage (msgs) {
+    while (msgs.length && this.push(msgs.pop())) continue
+    if (!msgs.length) return
+    this._q = this._q.append(msgs)
+    this.channel.cork()
+  }
+
+  async _onhandshake (handshake) {
+    if (this.onhandshake) return this.onhandshake(handshake)
+    else return true
+  }
+
+  async _onopen (handshake, cb) {
+    try {
+      const shouldConnect = await this._onhandshake(handshake)
+      if (!shouldConnect) return cb(new Error('Connection Rejected!'))
+      this.emit('connect')
+      this.remoteHandshake = handshake
+      return cb(null)
+    } catch (err) {
+      return cb(err)
+    }
   }
 }
 
-function onmessage ({ isInitiator, id }) {
-  if (!isInitiator) return this.emit(id.toString('hex'))
+exports.ProtoplexStream = ProtoplexStream
 
-  let bytes = null
-  let stream = null
-  let onresume = null
-  let destroyed = null
+module.exports = class Protoplex extends EventEmitter {
+  mux = null
 
-  const chan = this.mux.createChannel({
-    protocol: PROTOCOLS.CHAN,
-    id,
-    handshake: this.options.chan.handshakeEncoding,
-    onopen: onopen.bind(this),
-    ondestroy: () => {
-      if (destroyed) return
-      destroyed = true
-      if (stream) {
-        stream.push(null)
-        stream.end()
-      }
-    }
-  })
+  id = b4a.from([])
+  handshake = b4a.from([])
+  handshakeEncoding = c.raw
+  encoding = c.raw
+  unique = false
+  streamOpts = {}
 
-  this.open.send({ isInitiator: false, id })
-  chan.open(this.options.chan.handshake)
+  _streams = new Set()
+  _listeners = new Map()
 
-  function onopen (handshake) {
-    const encoding = (typeof this.options.chan.encoding === 'function')
-      ? (this.options.chan.encoding(false, id, handshake) || c.raw)
-      : (this.options.chan.encoding || c.raw)
-
-    bytes = chan.addMessage({
-      encoding,
-      onmessage (buf) {
-        if (stream.push(buf) === true) return
-        if (onresume) return
-        onresume = () => chan.uncork()
-        chan.cork()
-        backoff()
-      }
-    })
-
-    stream = new Duplex({
-      write: (buf, cb) => {
-        if (bytes.send(buf) === true) return cb(null)
-        this.mux.stream.once('drain', cb)
-      },
-      final (cb) {
-        if (destroyed) return cb(null)
-        destroyed = true
-        chan.close()
-        return cb(null)
-      }
-    })
-
-    stream.once('close', () => this.emit('destroy', PROTOCOLS.CHAN, id))
-
-    this.emit('connection', stream, id, handshake)
-
-    function backoff () {
-      if (Readable.isBackpressured(stream)) return setImmediate(backoff)
-      const cb = onresume
-      onresume = null
-      if (cb) return cb()
-    }
+  static from (muxOrStream, opts = {}) {
+    const mux = (muxOrStream instanceof Protomux)
+      ? muxOrStream
+      : new Protomux(muxOrStream)
+    return new Protoplex(mux, opts)
   }
+
+  get protocol () { return PROTOCOL }
+
+  constructor (mux, opts = {}) {
+    const {
+      id,
+      handshake,
+      handshakeEncoding,
+      onhandshake,
+      encoding,
+      unique,
+      ...streamOpts
+    } = opts
+
+    super()
+
+    this.mux = mux
+    this.id = id ?? this.id
+    this.handshake = handshake ?? this.handshake
+    this.handshakeEncoding = handshakeEncoding ?? this.handshakeEncoding
+    this.onhandshake = onhandshake ?? this.onhandshake
+    this.encoding = encoding ?? this.encoding
+    this.unique = unique ?? this.unique
+    this.streamOpts = streamOpts ?? this.streamOpts
+  }
+
+  listen (id, opts = {}) {
+    if (!b4a.isBuffer(id)) {
+      opts = id
+      id = null
+    }
+    const { protocol, id: _id } = this
+    id = id ?? _id
+    if (this._listeners.has(id)) return this
+    this._listeners.set(id, opts)
+    this.mux.pair({ protocol, id }, this._onpair.bind(this))
+    return this
+  }
+
+  unlisten (id) {
+    const { protocol } = this
+    if (!this._listeners.has(id)) return this
+    this._listeners.delete(id)
+    this.mux.unpair({ protocol, id })
+    return this
+  }
+
+  connect (id, _opts = {}) {
+    if (!b4a.isBuffer(id)) {
+      _opts = id
+      id = null
+    }
+
+    const {
+      protocol,
+      id: _id,
+      handshake,
+      handshakeEncoding,
+      onhandshake,
+      encoding,
+      unique,
+      streamOpts
+    } = this
+
+    id = id ?? _id
+
+    const opts = {
+      protocol,
+      handshake,
+      handshakeEncoding,
+      onhandshake,
+      encoding,
+      unique,
+      ...streamOpts,
+      ..._opts,
+      id
+    }
+
+    return new ProtoplexStream(this.mux, opts)
+  }
+
+  async _onpair (id) {
+    const _opts = this._listeners.get(id) ?? {}
+
+    const {
+      protocol,
+      id: _id,
+      handshake,
+      handshakeEncoding,
+      onhandshake,
+      encoding,
+      unique,
+      streamOpts
+    } = this
+
+    id = id ?? _id
+
+    const opts = {
+      protocol,
+      handshake,
+      handshakeEncoding,
+      onhandshake,
+      encoding,
+      unique,
+      ...streamOpts,
+      ..._opts,
+      id
+    }
+
+    const stream = new ProtoplexStream(this.mux, opts)
+    this._streams.add(stream)
+    stream.once('end', () => this._streams.delete(stream))
+
+    this.emit('connection', stream)
+  }
+
+  [Symbol.iterator] () { return this._streams[Symbol.iterator]() }
 }
