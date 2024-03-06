@@ -1,4 +1,4 @@
-const { EventEmitter } = require('ready-resource')
+const { EventEmitter } = require('events')
 const Protomux = require('protomux')
 const { Duplex } = require('streamx')
 const c = require('compact-encoding')
