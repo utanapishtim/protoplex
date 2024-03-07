@@ -1,11 +1,12 @@
-import SecretStream from '@hyperswarm/secret-stream'
 import Protomux from 'protomux'
-import Protoplex from './index.js'
-import { pipeline } from 'streamx'
 import test from 'brittle'
 import c from 'compact-encoding'
 import b4a from 'b4a'
 import struct from 'compact-encoding-struct'
+import FramedStream from 'framed-stream'
+import duplexes from 'duplex-through'
+
+import Protoplex from './index.js'
 
 test('should connect', async (t) => {
   t.plan(2)
@@ -13,7 +14,7 @@ test('should connect', async (t) => {
   server.on('connection', (stream) => { t.ok(stream) })
   server.listen()
   const stream = client.connect()
-  t.ok(stream)
+  stream.on('connect', () => { t.ok(stream) })
 })
 
 test('should connect on a given id', async (t) => {
@@ -22,7 +23,7 @@ test('should connect on a given id', async (t) => {
   server.on('connection', (stream) => { t.ok(stream) })
   server.listen(b4a.from('address'))
   const stream = client.connect(b4a.from('address'))
-  t.ok(stream)
+  stream.once('connect', () => { t.ok(true) })
 })
 
 test('should connect on a given id and not another', async (t) => {
@@ -48,14 +49,13 @@ test('should propogate close from "server"', async (t) => {
 })
 
 test('should propogate close from "client"', async (t) => {
-  t.plan(2)
+  t.plan(1)
   const { plexers: { server, client } } = testenv()
   server.on('connection', (stream) => {
-    t.ok(stream)
     stream.on('close', () => t.ok(true))
   })
-  server.listen()
-  const stream = client.connect()
+  server.listen(b4a.from('1'))
+  const stream = client.connect(b4a.from('1'))
   stream.once('connect', () => stream.destroy())
 })
 
@@ -76,7 +76,7 @@ test('should send from "client" to "server"', async (t) => {
 
 test('should send from "client" to "server" pre-connect', async (t) => {
   t.plan(1)
-  const { plexers: { server, client }, pipeline: p } = testenv({ pipe: (...args) => () => pipeline(...args) })
+  const { plexers: { server, client } } = testenv()
   const message = 'Hello, World!'
   server.on('connection', async (stream) => {
     let str = ''
@@ -87,7 +87,6 @@ test('should send from "client" to "server" pre-connect', async (t) => {
   const stream = client.connect()
   stream.write(Buffer.from(message))
   stream.end()
-  p()
 })
 
 test('should send from "server" to "client"', async (t) => {
@@ -181,30 +180,25 @@ test('it should support passing custom encodings', async (t) => {
   stream.end()
 })
 
-function testenv ({ onend = noop, pipe = pipeline, opts = {} } = {}) {
+function testenv ({ opts = {} } = {}) {
+  const [a, b] = duplexes()
+
   const streams = {
-    server: new SecretStream(false),
-    client: new SecretStream(true)
+    server: new FramedStream(a),
+    client: new FramedStream(b)
   }
+
   const muxers = {
     server: new Protomux(streams.server),
     client: new Protomux(streams.client)
   }
 
   const [sopts, copts] = (Array.isArray(opts)) ? opts : [opts, opts]
+
   const plexers = {
     server: new Protoplex(muxers.server, sopts),
     client: new Protoplex(muxers.client, copts)
   }
 
-  const pline = pipe(
-    plexers.client.mux.stream.rawStream,
-    plexers.server.mux.stream.rawStream,
-    plexers.client.mux.stream.rawStream,
-    onend
-  )
-
-  return { streams, muxers, plexers, pipeline: pline }
+  return { streams, muxers, plexers }
 }
-
-function noop () {}

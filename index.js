@@ -1,8 +1,10 @@
-const { EventEmitter } = require('events')
+const { EventEmitter, on } = require('events')
 const Protomux = require('protomux')
 const { Duplex } = require('streamx')
 const c = require('compact-encoding')
 const b4a = require('b4a')
+const BufferMap = require('tiny-buffer-map')
+const queueTick = require('queue-tick')
 
 const PROTOCOL = 'protoplex/alpha@0.0.0'
 
@@ -14,14 +16,17 @@ class ProtoplexStream extends Duplex {
   id = b4a.from([])
   handshake = b4a.from([])
   handshakeEncoding = c.raw
-  onhandshake = null
   encoding = c.array(c.raw)
   unique = false
+
+  onhandshake = null
 
   remoteHandshake = null
 
   _q = []
   _ondrain = null
+  _onopen = null
+  _openWith = null
 
   constructor (mux, opts = {}) {
     const {
@@ -36,56 +41,35 @@ class ProtoplexStream extends Duplex {
 
     super({ ...stream, eagerOpen: true })
 
-    if (!(mux instanceof Protomux)) throw new Error('mux not an instance of Protomux!')
+    if (!(mux?.isProtomux)) throw new Error('mux not an instance of Protomux!')
 
     this.mux = mux
     this.id = id ?? this.id
     this.handshake = handshake ?? this.handshake
     this.handshakeEncoding = handshakeEncoding ?? this.handshakeEncoding
     this.onhandshake = onhandshake ?? this.onhandshake
-    this.encoding = c.array(encoding) ?? this.encoding
+    this.encoding = (encoding) ? c.array(encoding) : this.encoding
     this.unique = unique ?? this.unique
-  }
-
-  _open (cb) {
-    const {
-      mux,
-      protocol,
-      id,
-      handshake,
-      handshakeEncoding,
-      encoding,
-      unique
-    } = this
-
-    let flag = false
-    const _cb = (err) => {
-      if (flag) return
-      flag = true
-      return cb(err)
-    }
 
     this.channel = mux.createChannel({
-      protocol,
-      id,
-      handshake: handshakeEncoding,
-      unique,
-      messages: [{ encoding, onmessage: this._onmessage.bind(this) }],
-      onopen: (handshake) => this._onopen(handshake, _cb),
+      protocol: this.protocol,
+      id: this.id,
+      handshake: this.handshakeEncoding,
+      unique: this.unique,
+      messages: [{ encoding: this.encoding, onmessage: this._onmessage.bind(this) }],
+      onopen: (handshake) => this._onchannelopen(handshake),
       onclose: () => {
-        if (!this.opened) _cb(null)
-        setTimeout(() => this.push(null), 0)
+        if (!this.opened) this._maybeOpen(null)
+        queueTick(() => this.push(null))
       },
       ondestroy: () => {
-        if (!this.opened) _cb(null)
-        setTimeout(() => this.destroy(), 0)
+        if (!this.opened) this._maybeOpen(null)
+        queueTick(() => this.destroy())
       },
-      ondrain: () => {
-        this._callondrain(null)
-      }
+      ondrain: this._callondrain.bind(this)
     })
 
-    this.channel.open(handshake)
+    this.channel.open(this.handshake)
   }
 
   _writev (data, cb) {
@@ -105,12 +89,11 @@ class ProtoplexStream extends Duplex {
   }
 
   _final (cb) {
-    setTimeout(() => this.channel.close(), 0)
+    queueTick(() => this.channel.close())
     return cb(null)
   }
 
   _destroy (cb) {
-    this.channel?.close()
     this.mux = null
     this.channel = null
     return cb(null)
@@ -139,15 +122,28 @@ class ProtoplexStream extends Duplex {
     else return true
   }
 
-  async _onopen (handshake, cb) {
+  _maybeOpen (err) {
+    this._openWith = this._openWith ?? err
+    const cb = this._onopen
+    if (!cb) return
+    this._onopen = null
+    return cb(this._openWith)
+  }
+
+  _open (cb) {
+    this._onopen = cb
+    this._maybeOpen(null)
+  }
+
+  async _onchannelopen (handshake) {
     try {
       const shouldConnect = await this._onhandshake(handshake)
-      if (!shouldConnect) return cb(new Error('Connection Rejected!'))
-      this.emit('connect')
+      if (!shouldConnect) return this._maybeOpen(new Error('Connection Rejected!'))
       this.remoteHandshake = handshake
-      return cb(null)
+      this.emit('connect')
+      return this._maybeOpen(null)
     } catch (err) {
-      return cb(err)
+      return this._maybeOpen(err)
     }
   }
 }
@@ -165,12 +161,12 @@ module.exports = class Protoplex extends EventEmitter {
   streamOpts = {}
 
   _streams = new Set()
-  _listeners = new Map()
+  _listeners = new BufferMap()
 
-  static from (muxOrStream, opts = {}) {
-    const mux = (muxOrStream instanceof Protomux)
-      ? muxOrStream
-      : new Protomux(muxOrStream)
+  static from (maybeMux, opts = {}) {
+    const mux = (maybeMux.isProtomux)
+      ? maybeMux
+      : Protomux.from(maybeMux)
     return new Protoplex(mux, opts)
   }
 
@@ -254,7 +250,7 @@ module.exports = class Protoplex extends EventEmitter {
     return new ProtoplexStream(this.mux, opts)
   }
 
-  async _onpair (id) {
+  _onpair (id) {
     const _opts = this._listeners.get(id) ?? {}
 
     const {
@@ -284,10 +280,11 @@ module.exports = class Protoplex extends EventEmitter {
 
     const stream = new ProtoplexStream(this.mux, opts)
     this._streams.add(stream)
-    stream.once('end', () => this._streams.delete(stream))
-
+    stream.once('close', () => this._streams.delete(stream))
     this.emit('connection', stream)
   }
 
   [Symbol.iterator] () { return this._streams[Symbol.iterator]() }
+
+  [Symbol.asyncIterator] () { return on(this, 'connection') }
 }
