@@ -22,7 +22,7 @@ pipeline(
 
 const message = Buffer.from('Hello, World!')
 
-server.on('connection', async (stream, id) => {
+server.on('connection', async (stream) => {
   let str = ''
   for await (const buf of stream) str += buf.toString()
   console.log(str) // prints 'Hello, World!'
@@ -74,8 +74,6 @@ Options passed through to `new Protoplex(mux, [options])`.
 
 Options are the same as for `Protoplex.from` but override those defaults for.
 
-TODO: ~~Alternatively, you can call `plex.connect([options])` and a random id will be generated.~~
-
 #### `stream.on('connect')`
 
 Emitted when the stream is opened and the handshake was accepted.
@@ -86,4 +84,8 @@ Emitted when a remote connection is opened.
 
 #### `for (const connection of plex)`
 
-Iterate over all open connections
+Iterate over all open connections.
+
+#### `for await (const stream of plex)`
+
+Iterate over all connections as they arrive.
