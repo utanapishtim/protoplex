@@ -65,7 +65,9 @@ test('should send from "client" to "server"', async (t) => {
   const message = 'Hello, World!'
   server.on('connection', async (stream) => {
     let str = ''
-    for await (const buf of stream) str += buf.toString()
+    for await (const buf of stream) {
+      str += buf.toString()
+    }
     t.is(str, message)
   })
   server.listen()
@@ -116,7 +118,9 @@ test('it should send and recv messages from many clients', async (t) => {
 
   server.on('connection', async (stream, id) => {
     let str = ''
-    for await (const buf of stream) str += buf.toString()
+    for await (const buf of stream) {
+      str += buf.toString()
+    }
     t.is(str, message)
   })
   server.listen()
@@ -180,6 +184,61 @@ test('it should support passing custom encodings', async (t) => {
   stream.end()
 })
 
+test('big bidirectional write', async (t) => {
+  t.plan(2)
+  const { plexers: { server, client } } = testenv({ opts: { encoding: c.raw } })
+  const message = randomStr(100000)
+
+  server.on('connection', async (stream) => {
+    let str = ''
+    for await (const buf of stream) { str += buf.toString() }
+    t.is(str, message)
+  })
+
+  client.on('connection', async (stream) => {
+    let str = ''
+    for await (const buf of stream) { str += buf.toString() }
+    t.is(str, message)
+  })
+
+  server.listen(Buffer.from('server'))
+  client.listen(Buffer.from('client'))
+
+  ;(async () => {
+    const stream = client.connect(Buffer.from('server'))
+    let i = 0
+    for (const char of message.split('')) {
+      stream.write(Buffer.from(char))
+      if (i++ % 10000 === 0) await new Promise((resolve) => setTimeout(resolve, 25 * Math.floor(Math.random() * 100)))
+    }
+    stream.end()
+  })()
+
+  ;(async () => {
+    const stream = server.connect(Buffer.from('client'))
+    let i = 0
+    for (const char of message.split('')) {
+      stream.write(Buffer.from(char))
+      if (i++ % 10000 === 0) await new Promise((resolve) => setTimeout(resolve, 25 * Math.floor(Math.random() * 100)))
+    }
+    stream.end()
+  })()
+})
+
+function random (max = Number.MAX_SAFE_INTEGER) {
+  return Math.floor(Math.random() * max)
+}
+
+function randomChar () {
+  return String.fromCharCode(random(4))
+}
+
+function randomStr (len) {
+  let str = ''
+  while (str.length < len) str += randomChar()
+  return str
+}
+
 function testenv ({ opts = {} } = {}) {
   const [a, b] = duplexes()
 
@@ -196,8 +255,8 @@ function testenv ({ opts = {} } = {}) {
   const [sopts, copts] = (Array.isArray(opts)) ? opts : [opts, opts]
 
   const plexers = {
-    server: new Protoplex(muxers.server, sopts),
-    client: new Protoplex(muxers.client, copts)
+    server: new Protoplex(muxers.server, { userData: 'server', ...sopts }),
+    client: new Protoplex(muxers.client, { userData: 'client', ...copts })
   }
 
   return { streams, muxers, plexers }

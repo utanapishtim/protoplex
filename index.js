@@ -4,9 +4,11 @@ const { Duplex } = require('streamx')
 const c = require('compact-encoding')
 const b4a = require('b4a')
 const BufferMap = require('tiny-buffer-map')
-const queueTick = require('queue-tick')
+const FIFO = require('fast-fifo')
 
-const PROTOCOL = 'protoplex/alpha@0.0.0'
+const { version } = require('./package.json')
+
+const PROTOCOL = `protoplex/alpha@${version}`
 
 class ProtoplexStream extends Duplex {
   mux = null
@@ -16,17 +18,19 @@ class ProtoplexStream extends Duplex {
   id = b4a.from([])
   handshake = b4a.from([])
   handshakeEncoding = c.raw
-  encoding = c.array(c.raw)
+  encoding = c.raw.array(c.raw)
   unique = false
 
   onhandshake = null
 
   remoteHandshake = null
 
-  _q = []
+  _q = new FIFO()
   _ondrain = null
   _onopen = null
   _openWith = null
+
+  opened = false
 
   constructor (mux, opts = {}) {
     const {
@@ -36,6 +40,7 @@ class ProtoplexStream extends Duplex {
       onhandshake,
       encoding,
       unique,
+      userData,
       ...stream
     } = opts
 
@@ -48,8 +53,9 @@ class ProtoplexStream extends Duplex {
     this.handshake = handshake ?? this.handshake
     this.handshakeEncoding = handshakeEncoding ?? this.handshakeEncoding
     this.onhandshake = onhandshake ?? this.onhandshake
-    this.encoding = (encoding) ? c.array(encoding) : this.encoding
+    this.encoding = (encoding) ? c.raw.array(encoding) : this.encoding
     this.unique = unique ?? this.unique
+    this.userData = userData ?? null
 
     this.channel = mux.createChannel({
       protocol: this.protocol,
@@ -59,12 +65,13 @@ class ProtoplexStream extends Duplex {
       messages: [{ encoding: this.encoding, onmessage: this._onmessage.bind(this) }],
       onopen: (handshake) => this._onchannelopen(handshake),
       onclose: () => {
+        const endOuter = () => { if (!this.destroyed) this.push(null) }
         if (!this.opened) this._maybeOpen(null)
-        queueTick(() => this.push(null))
+        setImmediate(endOuter)
       },
       ondestroy: () => {
         if (!this.opened) this._maybeOpen(null)
-        queueTick(() => this.destroy())
+        setImmediate(this.destroy.bind(this))
       },
       ondrain: this._callondrain.bind(this)
     })
@@ -75,7 +82,7 @@ class ProtoplexStream extends Duplex {
   _writev (data, cb) {
     try {
       if (this.channel.messages[0].send(data)) return cb(null)
-      else this._ondrain = cb
+      this._ondrain = cb
     } catch (err) {
       return cb(err)
     }
@@ -83,13 +90,13 @@ class ProtoplexStream extends Duplex {
 
   _read (cb) {
     this.channel.uncork()
-    while (this._q.length && this.push(this._q.pop())) continue
-    if (this._q.length) this.channel.cork()
+    while (this._q.length && this.push(this._q.shift())) continue
+    if (!this._q.isEmpty()) this.channel.cork()
     return cb(null)
   }
 
   _final (cb) {
-    queueTick(() => this.channel.close())
+    this.channel?.close()
     return cb(null)
   }
 
@@ -100,8 +107,9 @@ class ProtoplexStream extends Duplex {
   }
 
   _predestroy () {
+    this.opened = false
     this.channel?.close()
-    this._callondrain(new Error('Stream was destroyed'))
+    this._maybeOpen(new Error('Stream was destroyed!'))
   }
 
   _callondrain (err) {
@@ -110,11 +118,13 @@ class ProtoplexStream extends Duplex {
     if (cb) return cb(err)
   }
 
-  _onmessage (msgs) {
-    while (msgs.length && this.push(msgs.pop())) continue
-    if (!msgs.length) return
-    this._q = this._q.append(msgs)
-    this.channel.cork()
+  _onmessage (batch) {
+    let drain = true
+    for (const data of batch) {
+      if (drain) drain = this.push(data)
+      else this._q.push(data)
+    }
+    if (drain) this.channel.cork()
   }
 
   async _onhandshake (handshake) {
@@ -125,14 +135,16 @@ class ProtoplexStream extends Duplex {
   _maybeOpen (err) {
     this._openWith = this._openWith ?? err
     const cb = this._onopen
-    if (!cb) return
     this._onopen = null
-    return cb(this._openWith)
+    if (cb) {
+      this.opened = true
+      return cb(this._openWith)
+    }
   }
 
   _open (cb) {
     this._onopen = cb
-    this._maybeOpen(null)
+    if (this.channel.opened) this._maybeOpen(null)
   }
 
   async _onchannelopen (handshake) {
@@ -153,11 +165,11 @@ exports.ProtoplexStream = ProtoplexStream
 module.exports = class Protoplex extends EventEmitter {
   mux = null
 
-  id = b4a.from([])
-  handshake = b4a.from([])
-  handshakeEncoding = c.raw
-  encoding = c.raw
-  unique = false
+  id = null
+  handshake = null
+  handshakeEncoding = null
+  encoding = null
+  unique = null
   streamOpts = {}
 
   _streams = new Set()
